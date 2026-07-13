@@ -15,7 +15,6 @@ class ForpsiClient:
         self.base_url = f"https://{admin_site}"
         self._authenticated = False
 
-
     def _authenticate(self) -> None:
         if self._authenticated:
             return
@@ -83,20 +82,30 @@ class ForpsiClient:
                 # Státusz tisztítás
                 clean_status = status.replace('<br>', ' ').replace('<br/>', ' ').strip()
                 clean_status = re.sub(r'\s+', ' ', clean_status)
+                clean_label = label.strip()
 
-                # Névszerverek tisztítása és összefűzése SIMA VESSZŐVEL (space nélkül)
+                # Névszerverek tisztítása és összefűzése
                 ns_clean = ns.replace('<br/>', '<br>')
                 ns_list = [item.strip() for item in ns_clean.split('<br>') if item.strip()]
-                nameservers_str = ",".join(ns_list)  # <-- Itt nincs szóköz a vessző után
+                nameservers_str = ",".join(ns_list)
+
+                # --- MULTILANG STÁTUSZ ELLENŐRZÉS ---
+                # A képen látható, hogy a cseh nyelvű verzióban a label "OK", a szöveg "v pořádku".
+                # Itt egyszerre vizsgáljuk a magyar, angol és cseh kulcsszavakat.
+                is_active = (
+                    clean_label.upper() in ["AKTÍV", "ACTIVE", "OK"] or 
+                    "v pořádku" in clean_status.lower()
+                )
 
                 parsed_domains.append({
                     "id": int(d_id),
                     "domain": d_name.strip(),
-                    "label": label.strip(),
+                    "label": clean_label,
                     "status_text": clean_status,
                     "nameservers": nameservers_str,
                     "expiry_date": formatted_date,
-                    "days_remaining": days_remaining
+                    "days_remaining": days_remaining,
+                    "is_active": is_active
                 })
             
             return parsed_domains
@@ -111,9 +120,9 @@ class ForpsiClient:
         if not self._authenticated:
             self.login()
             
-        url = f"https://admin.forpsi.hu/domain/domains-dns.php?id={domain_id}"
+        url = f"{self.base_url}/domain/domains-dns.php?id={domain_id}"
         logger.info(f"DNS rekordok letöltése innen: {url}")
-        
+
         response = self.session.get(url)
         if response.status_code != 200:
             logger.error(f"Nem sikerült letölteni a DNS oldat az alábbi ID-hoz: {domain_id}")
@@ -154,31 +163,3 @@ class ForpsiClient:
                 })
                 
         return records
-
-
-
-    # def _authenticate(self) -> None:
-    #     if self._authenticated:
-    #         return
-    #     logger.info(f"Bejelentkezés: {self.admin_site}")
-    #     try:
-    #         headers = {'User-Agent': 'Mozilla/5.0'}
-    #         self.session.get(f"{self.base_url}/index.php", headers=headers)
-    #         login_data = {'login_action': 'client_login', 'user_name': self.username, 'password': self.password, 'otp_code': ''}
-    #         self.session.post(f"{self.base_url}/index.php", data=login_data, headers=headers)
-    #         if not any(cookie.name == 'FAUTH' for cookie in self.session.cookies):
-    #             raise ValueError("Sikertelen login.")
-    #         self._authenticated = True
-    #     except requests.RequestException as e:
-    #         raise ConnectionError(f"Hiba: {e}")
-
-    # def get_domains_info(self) -> List[Dict]:
-    #     self._authenticate()
-    #     response = self.session.get(f"{self.base_url}/domain/domains-list.php")
-    #     # ... (ide másold be a te eredeti get_domains_info függvényed regex logikáját)
-    #     return [] # Teszt
-
-    # def get_dns_records(self, domain_id: int) -> list:
-    #     self._authenticate()
-    #     # ... (ide másold be a te eredeti get_dns_records függvényedet)
-    #     return [] # Teszt

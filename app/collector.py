@@ -189,17 +189,20 @@ class ForpsiCollector(object):
                 [d['domain'], str(d['id']), d['expiry_date'], d['nameservers']],
                 d['days_remaining']
             )
-            status_value = 1.0 if d['label'] == "AKTÍV" else 0.0
+            
+            # Dinamikus többnyelvű státusz figyelés a client.py-ból kapott érték alapján
+            status_value = 1.0 if d.get('is_active', False) else 0.0
+
             status_metric.add_metric(
                 [d['domain'], str(d['id']), d['label'], d['status_text'], d['nameservers']],
                 status_value
             )
             
-            # ÚJ: DNS rekordok hozzáfűzése a metrikákhoz
+            # DNS rekordok hozzáfűzése a metrikákhoz
             for r in d.get('dns_records', []):
                 dns_record_metric.add_metric(
                     [d['domain'], r['hostname'], r['type'], r['value'], r['ttl']],
-                    1.0  # Fix érték, a lényeg a label állományban van
+                    1.0 
                 )
             
         scrape_success_metric.add_metric([], last_scrape_success)
