@@ -50,67 +50,70 @@ class ForpsiClient:
         except requests.RequestException as e:
             raise ConnectionError(f"Hálózati hiba az azonosítás során: {e}")
 
+    def _get_domain_ids(self) -> Dict[str, int]:
+        """
+        A domain lista CSV exportja nem tartalmaz domain ID-t (csak a DNS
+        exporthoz szükséges id=... paraméterhez kellene), ezért ezt egy
+        könnyű regex-szel kiolvassuk a sima domains-list.php oldalról,
+        és domain név -> id szótárrá alakítjuk.
+        """
+        response = self.session.get(f"{self.base_url}/domain/domains-list.php")
+        if response.status_code != 200:
+            raise RuntimeError(f"Nem sikerült letölteni a domain listát az ID-khez: {response.status_code}")
+
+        pattern = r'id=(\d+)&amp;[^>]*>([^<]+)</a>'
+        matches = re.findall(pattern, response.text)
+        return {name.strip(): int(d_id) for d_id, name in matches}
+
     def get_domains_info(self) -> List[Dict[str, any]]:
         self._authenticate()
-        
+
         try:
-            response = self.session.get(f"{self.base_url}/domain/domains-list.php")
+            domain_ids = self._get_domain_ids()
+
+            url = f"{self.base_url}/domain/domains-list-csv-export.php"
+            response = self.session.get(url)
             if response.status_code != 200:
-                raise RuntimeError(f"Nem sikerült letölteni a listát: {response.status_code}")
-            
-            pattern = (
-                r'id=(\d+)&amp;[^>]*>([^<]+)</a>'
-                r'.*?class="group_label[^>]*>([^<]+)</div>'
-                r'.*?<td[^>]*>(.*?)</td>'
-                r'.*?<td>(.*?)</td>'
-                r'.*?<strong>(.*?)</strong>'
-            )
-            
-            matches = re.findall(pattern, response.text, re.DOTALL)
-            parsed_domains = []
-            
+                raise RuntimeError(f"Nem sikerült letölteni a domain lista CSV exportot: {response.status_code}")
+
+            reader = csv.reader(io.StringIO(response.text))
+            rows = list(reader)
+
             today = date.today()
+            parsed_domains = []
 
-            for d_id, d_name, label, status, ns, expiry in matches:
-                # Dátum formázás yyyy-mm-dd alakra
-                date_parts = [p.strip() for p in expiry.split('.') if p.strip()]
-                formatted_date = "unknown"
+            for row in rows:
+                if len(row) < 5:
+                    continue
+
+                label, d_name, status_text, nameservers_raw, expiry_str = [c.strip() for c in row[:5]]
+
+                # Dátum: a CSV export már yyyy-mm-dd formátumban adja
+                formatted_date = expiry_str if expiry_str else "unknown"
                 days_remaining = -1
-                
-                if len(date_parts) == 3:
-                    formatted_date = f"{date_parts[0]}-{date_parts[1]}-{date_parts[2]}"
-                    expiry_date_obj = date(int(date_parts[0]), int(date_parts[1]), int(date_parts[2]))
-                    days_remaining = (expiry_date_obj - today).days
+                if expiry_str:
+                    try:
+                        expiry_date_obj = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                        days_remaining = (expiry_date_obj - today).days
+                    except ValueError:
+                        formatted_date = "unknown"
 
-                # Státusz tisztítás
-                clean_status = status.replace('<br>', ' ').replace('<br/>', ' ').strip()
-                clean_status = re.sub(r'\s+', ' ', clean_status)
-                clean_label = label.strip()
+                # Névszerverek: szóközzel elválasztva jönnek, vesszős stringgé alakítjuk
+                nameservers_str = ",".join(ns for ns in nameservers_raw.split() if ns)
 
-                # Névszerverek tisztítása és összefűzése
-                ns_clean = ns.replace('<br/>', '<br>')
-                ns_list = [item.strip() for item in ns_clean.split('<br>') if item.strip()]
-                nameservers_str = ",".join(ns_list)
-
-                # --- MULTILANG STÁTUSZ ELLENŐRZÉS ---
-                # A képen látható, hogy a cseh nyelvű verzióban a label "OK", a szöveg "v pořádku".
-                # Itt egyszerre vizsgáljuk a magyar, angol és cseh kulcsszavakat.
-                is_active = (
-                    clean_label.upper() in ["AKTÍV", "ACTIVE", "OK"] or 
-                    "v pořádku" in clean_status.lower()
-                )
+                is_active = label.upper() == "OK"
 
                 parsed_domains.append({
-                    "id": int(d_id),
-                    "domain": d_name.strip(),
-                    "label": clean_label,
-                    "status_text": clean_status,
+                    "id": domain_ids.get(d_name, 0),
+                    "domain": d_name,
+                    "label": label,
+                    "status_text": status_text,
                     "nameservers": nameservers_str,
                     "expiry_date": formatted_date,
                     "days_remaining": days_remaining,
                     "is_active": is_active
                 })
-            
+
             return parsed_domains
 
         except requests.RequestException as e:
@@ -118,62 +121,49 @@ class ForpsiClient:
 
     def get_dns_records(self, domain_id: int) -> list:
         """
-        Lekéri a megadott domain azonosítóhoz tartozó DNS rekordokat HTML parsolással.
+        Lekéri a megadott domain azonosítóhoz tartozó DNS rekordokat a
+        dns-edit.php CSV exportján keresztül (POST ak=export&export_type=csv).
         """
-        if not self._authenticated:
-            self.login()
-            
+        self._authenticate()
+
         url = f"{self.base_url}/domain/domains-dns.php?id={domain_id}"
-        logger.info(f"DNS rekordok letöltése innen: {url}")
+        logger.info(f"DNS rekordok CSV exportjának letöltése innen: {url}")
 
-        response = self.session.get(url)
-        if response.status_code != 200:
-            logger.error(f"Nem sikerült letölteni a DNS oldat az alábbi ID-hoz: {domain_id}")
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': f"{url}&new=1",
+            'Origin': f'https://{self.admin_site}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/139.0'
+        }
+
+        try:
+            response = self.session.post(url, data={'ak': 'export', 'export_type': 'csv'}, headers=headers)
+        except requests.RequestException as e:
+            logger.error(f"Hálózati hiba a(z) {domain_id} DNS exportjának letöltésekor: {e}")
             return []
-            
-        html = response.text
+
+        if response.status_code != 200:
+            logger.error(f"Nem sikerült letölteni a DNS exportot az alábbi ID-hoz: {domain_id} ({response.status_code})")
+            return []
+
+        reader = csv.reader(io.StringIO(response.text), delimiter=';')
+        rows = list(reader)
+
+        if not rows:
+            return []
+
         records = []
+        for row in rows[1:]:  # fejléc (Hostname;TTL;Type;Value) kihagyása
+            if len(row) < 4:
+                continue
 
-        # 1. Kettévágjuk a HTML-t a táblázat sorai mentén, így biztonságosabb dolgozni
-        # Csak azokat a sorokat nézzük, amik az 'editable' osztályba tartoznak
-        rows = re.findall(r'<tr[^>]*class="[^"]*editable[^"]*".*?>.*?</tr>', html, re.DOTALL | re.IGNORECASE)
+            records.append({
+                'hostname': row[0].strip(),
+                'ttl': row[1].strip(),
+                'type': row[2].strip(),
+                'value': row[3].strip()
+            })
 
-        for row in rows:
-            # Kigyűjtjük a soron belüli összes cellát (<td>...</td>)
-            # Elsősorban a 'title' attribútumból dolgozunk, mert a Forpsi ott tárolja a teljes, vágatlan értéket!
-            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
-            
-            if len(cells) >= 4:
-                # Segédfüggvény a title="..." vagy a tiszta belső szöveg kinyerésére
-                def get_clean_value(cell_html):
-                    title_match = re.search(r'title="([^"]+)"', cell_html, re.IGNORECASE)
-                    if title_match:
-                        return title_match.group(1).strip()
-                    # Ha nincs title, kipucoljuk a HTML tageket és entitásokat
-                    text_only = re.sub(r'<[^>]+>', '', cell_html)
-                    return text_only.replace('&nbsp;', ' ').strip()
-
-                hostname = get_clean_value(cells[0])
-                ttl = get_clean_value(cells[1])
-                rtype = get_clean_value(cells[2])
-                value = get_clean_value(cells[3])
-
-                # --- SRV REKORDOK TISZTÍTÁSA (MULTILANG) ---
-                if rtype.upper() == 'SRV':
-                    # Töröljük a címkéket (betűk, ékezetes magyar/cseh karakterek, amiket kettőspont követ)
-                    val_clean = re.sub(r'[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰěščřžýáíéóúůďťňĚŠČŘŽÝÁÍÉÓÚŮĎŤŇ]+:\s*', '', value)
-                    # A megmaradt vesszőket szóközre cseréljük
-                    val_clean = val_clean.replace(',', ' ')
-                    # Eltávolítjuk a felesleges dupla szóközöket, így egy tiszta "weight port target" stringet kapunk
-                    value = re.sub(r'\s+', ' ', val_clean).strip()
-
-                records.append({
-                    'hostname': hostname,
-                    'ttl': ttl,
-                    'type': rtype,
-                    'value': value
-                })
-                
         return records
 
 
