@@ -1,7 +1,10 @@
 import logging
+import csv
+import io
 import re
 import requests
 from datetime import date
+from datetime import datetime
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
@@ -172,3 +175,61 @@ class ForpsiClient:
                 })
                 
         return records
+
+
+    def get_invoices(self) -> List[Dict[str, any]]:
+        self._authenticate()
+        url = f"{self.base_url}/billing/invoices-csv-export.php"
+
+        try:
+            response = self.session.get(url)
+            reader = csv.reader(io.StringIO(response.text))
+            rows = list(reader)
+
+            if not rows:
+                return []
+
+            data_rows = rows[1:]  # fejléc kihagyása
+
+            def parse_date(value: str) -> str:
+                value = value.strip()
+                if not value:
+                    return ''
+                try:
+                    return datetime.strptime(value, '%Y. %m. %d.').strftime('%Y-%m-%d')
+                except ValueError:
+                    return ''
+
+            invoices = []
+            for row in data_rows:
+                if len(row) < 8:
+                    continue
+
+                issue_date = parse_date(row[4])
+                payment_date = parse_date(row[5])
+                is_paid = len(payment_date) > 0
+
+                raw_amount = row[6].replace(',', '.').replace(' ', '')
+                try:
+                    amount = float(raw_amount)
+                except ValueError:
+                    amount = 0.0
+
+                invoices.append({
+                    'service_type': row[0].strip(),
+                    'description': row[1].strip(),
+                    'proforma_id': row[2].strip(),
+                    'tax_id': row[3].strip(),
+                    'is_paid': is_paid,
+                    'status_text': 'PAID' if is_paid else 'UNPAID',
+                    'amount': amount,
+                    'currency': row[7].strip(),
+                    'issue_date': issue_date,
+                    'payment_date': payment_date
+                })
+
+            return invoices
+
+        except Exception as e:
+            logger.error(f"Hiba a CSV feldolgozásakor: {e}")
+            return []

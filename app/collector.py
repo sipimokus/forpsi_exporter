@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import logging
+from typing import List, Dict
 from prometheus_client.core import GaugeMetricFamily
 from app.client import ForpsiClient
 
@@ -25,6 +26,7 @@ class ForpsiCollector(object):
 
         self.lock = threading.Lock()
         self.cached_domains: List[Dict] = []
+        self.cached_invoices: List[Dict] = []
         self.last_scrape_time = 0.0
         self.last_scrape_success = 0  # amíg nincs első sikeres frissítés, 0
         self.refresh_in_progress = False
@@ -61,7 +63,7 @@ class ForpsiCollector(object):
     def _refresh_once(self) -> None:
         logger.info("Háttérfrissítés indítása a Forpsiról (metrics lekérdezés váltotta ki)...")
         try:
-            # 1. Alap domain infók lekérése
+            # --- Domain infók lekérése ---
             domainek = self.client.get_domains_info()
 
             if not domainek:
@@ -71,6 +73,14 @@ class ForpsiCollector(object):
                 with self.lock:
                     self.last_scrape_success = 0
                 return
+
+            # --- Számlák lekérése ---
+            try:
+                szamlak = self.client.get_invoices()
+                logger.info(f"Számlák sikeresen lekérve ({len(szamlak)} db).")
+            except Exception as inv_err:
+                logger.error(f"Számlák letöltési hibája (marad a cache): {inv_err}")
+                szamlak = self.cached_invoices  # Hiba esetén megtartjuk a régit
 
             # Az előző cache-ből kinyerjük az egyes domainekhez tartozó, korábban
             # már lekért DNS rekordokat, hogy frissítés közben NE tűnjenek el
@@ -86,6 +96,7 @@ class ForpsiCollector(object):
             # a korábbi (még érvényes) értékeket mutatják, amíg felül nem íródnak.
             with self.lock:
                 self.cached_domains = domainek
+                self.cached_invoices = szamlak
                 self.last_scrape_time = time.time()
                 self.last_scrape_success = 1
             logger.info(f"Domain lista publikálva a cache-be ({len(domainek)} domain, a régi DNS adatok egyelőre megtartva), a DNS rekordok frissítése folytatódik...")
@@ -140,6 +151,7 @@ class ForpsiCollector(object):
         # Csak olvasunk a cache-ből, hálózati hívás itt SOHA nem történik
         with self.lock:
             domainek = list(self.cached_domains)
+            szamlak = list(self.cached_invoices)
             last_scrape_success = self.last_scrape_success
             last_scrape_time = self.last_scrape_time
             refreshing = self.refresh_in_progress
@@ -149,6 +161,26 @@ class ForpsiCollector(object):
             f"Metrikák kiszolgálása a cache-ből (kor: {age:.0f}s, "
             f"utolsó frissítés sikeres: {bool(last_scrape_success)}, frissítés folyamatban: {refreshing})"
         )
+
+        # --- AGGREGÁCIÓ ---
+        # Összesítjük az adatokat valuta szerint (HUF, EUR)
+        stats = {} 
+        for inv in szamlak:
+            curr = inv['currency']
+            if curr not in stats:
+                stats[curr] = {'paid_count': 0, 'unpaid_count': 0, 'paid_sum': 0.0, 'unpaid_sum': 0.0}
+            
+            if inv['is_paid']:
+                stats[curr]['paid_count'] += 1
+                stats[curr]['paid_sum'] += inv['amount']
+            else:
+                stats[curr]['unpaid_count'] += 1
+                stats[curr]['unpaid_sum'] += inv['amount']
+
+        if stats:
+            logger.info(f"Számla metrikák generálva ({len(szamlak)} db összesen)")
+        else:
+            logger.info("Számla metrikák generálva: nincs számla adat a cache-ben.")
 
         # === METRIKÁK GENERÁLÁSA ===
         expiry_days_metric = GaugeMetricFamily(
@@ -175,6 +207,28 @@ class ForpsiCollector(object):
             'Total number of DNS records for a given domain',
             labels=['domain', 'domain_id']
         )
+
+        # --- SZÁMLA METRIKÁK ---       
+        invoice_status_metric = GaugeMetricFamily(
+            'forpsi_invoice_paid_status',
+            '1 if the invoice is PAID, 0 if UNPAID',
+            labels=['service_type', 'description', 'proforma_id', 'tax_id', 'issue_date', 'payment_date']
+        )
+        invoice_amount_metric = GaugeMetricFamily(
+            'forpsi_invoice_amount',
+            'Amount of the invoice',
+            labels=['service_type', 'description', 'proforma_id', 'currency', 'status']
+        )
+        invoice_count_metric = GaugeMetricFamily(
+            'forpsi_invoices_total',
+            'Number of invoices by status and currency',
+            labels=['currency', 'status']
+        )
+        invoice_sum_metric = GaugeMetricFamily(
+            'forpsi_invoices_amount_total',
+            'Total amount of invoices by status and currency',
+            labels=['currency', 'status']
+        )
         # -----------------------------
         
         scrape_success_metric = GaugeMetricFamily(
@@ -193,6 +247,7 @@ class ForpsiCollector(object):
         # 1. Teljes domain szám beállítása
         domains_total_metric.add_metric([], len(domainek))
 
+        # --- DOMAIN CIKLUS ---
         for d in domainek:
             expiry_days_metric.add_metric(
                 [d['domain'], str(d['id']), d['expiry_date'], d['nameservers']],
@@ -215,7 +270,42 @@ class ForpsiCollector(object):
                     [d['domain'], r['hostname'], r['type'], r['value'], r['ttl']],
                     1.0 
                 )
+
+        # --- SZÁMLA CIKLUS ---
+        for inv in szamlak:
+            invoice_status_metric.add_metric(
+                [
+                    inv['service_type'], 
+                    inv['description'], 
+                    inv['proforma_id'], 
+                    inv['tax_id'], 
+                    inv['issue_date'], 
+                    inv['payment_date']
+                ],
+                1.0 if inv['is_paid'] else 0.0
+            )
             
+            invoice_amount_metric.add_metric(
+                [
+                    inv['service_type'], 
+                    inv['description'], 
+                    inv['proforma_id'], 
+                    inv['currency'], 
+                    inv['status_text']
+                ],
+                inv['amount']
+            )
+
+        # --- METRIKÁK FELTÖLTÉSE ---
+        for curr, data in stats.items():
+            # Paid metrikák
+            invoice_count_metric.add_metric([curr, 'PAID'], data['paid_count'])
+            invoice_sum_metric.add_metric([curr, 'PAID'], data['paid_sum'])
+            
+            # Unpaid metrikák
+            invoice_count_metric.add_metric([curr, 'UNPAID'], data['unpaid_count'])
+            invoice_sum_metric.add_metric([curr, 'UNPAID'], data['unpaid_sum'])
+
         scrape_success_metric.add_metric([], last_scrape_success)
         refresh_in_progress_metric.add_metric([], 1.0 if refreshing else 0.0)
         cache_age_metric.add_metric([], age if age >= 0 else -1.0)
@@ -223,8 +313,12 @@ class ForpsiCollector(object):
         yield expiry_days_metric
         yield status_metric
         yield dns_record_metric
-        yield domains_total_metric          # ÚJ: Yieldeljük a domain countert
-        yield dns_records_total_metric      # ÚJ: Yieldeljük a DNS countert
+        yield dns_records_total_metric
+        yield domains_total_metric
+        yield invoice_status_metric
+        yield invoice_count_metric
+        yield invoice_amount_metric
+        yield invoice_sum_metric
         yield scrape_success_metric
         yield refresh_in_progress_metric
         yield cache_age_metric
