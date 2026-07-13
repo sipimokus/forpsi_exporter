@@ -155,6 +155,15 @@ class ForpsiClient:
                 rtype = get_clean_value(cells[2])
                 value = get_clean_value(cells[3])
 
+                # --- SRV REKORDOK TISZTÍTÁSA (MULTILANG) ---
+                if rtype.upper() == 'SRV':
+                    # Töröljük a címkéket (betűk, ékezetes magyar/cseh karakterek, amiket kettőspont követ)
+                    val_clean = re.sub(r'[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰěščřžýáíéóúůďťňĚŠČŘŽÝÁÍÉÓÚŮĎŤŇ]+:\s*', '', value)
+                    # A megmaradt vesszőket szóközre cseréljük
+                    val_clean = val_clean.replace(',', ' ')
+                    # Eltávolítjuk a felesleges dupla szóközöket, így egy tiszta "weight port target" stringet kapunk
+                    value = re.sub(r'\s+', ' ', val_clean).strip()
+
                 records.append({
                     'hostname': hostname,
                     'ttl': ttl,

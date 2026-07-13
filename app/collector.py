@@ -161,45 +161,56 @@ class ForpsiCollector(object):
             'Status of the domain (1 = AKTÍV/OK, 0 = egyéb)', 
             labels=['domain', 'domain_id', 'label', 'status_text', 'nameservers']
         )
-        # ÚJ: DNS rekord metrika család (Info minta)
         dns_record_metric = GaugeMetricFamily(
             'forpsi_domain_dns_record',
             'DNS records configured in Forpsi DNS zone management',
             labels=['domain', 'hostname', 'type', 'value', 'ttl']
         )
+        domains_total_metric = GaugeMetricFamily(
+            'forpsi_domains_total',
+            'Total number of domains in the Forpsi account'
+        )
+        dns_records_total_metric = GaugeMetricFamily(
+            'forpsi_domain_dns_records_total',
+            'Total number of DNS records for a given domain',
+            labels=['domain', 'domain_id']
+        )
+        # -----------------------------
         
         scrape_success_metric = GaugeMetricFamily(
             'forpsi_scrape_success',
             '1 if the last scrape to Forpsi admin was successful, 0 otherwise'
         )
-
-        # ÚJ: exporter állapot metrika - mutatja, hogy fut-e éppen háttérfrissítés,
-        # és milyen régi a jelenleg kiszolgált cache-elt adat.
         refresh_in_progress_metric = GaugeMetricFamily(
             'forpsi_exporter_refresh_in_progress',
-            '1 if a background refresh (domain list and/or DNS records) is currently running, 0 if data is idle/fresh'
+            '1 if a background refresh is currently running, 0 otherwise'
         )
         cache_age_metric = GaugeMetricFamily(
             'forpsi_exporter_cache_age_seconds',
-            'Age in seconds of the currently served cached data (time since last successful (partial) update)'
+            'Age in seconds of the currently served cached data'
         )
+
+        # 1. Teljes domain szám beállítása
+        domains_total_metric.add_metric([], len(domainek))
 
         for d in domainek:
             expiry_days_metric.add_metric(
                 [d['domain'], str(d['id']), d['expiry_date'], d['nameservers']],
                 d['days_remaining']
             )
-            
-            # Dinamikus többnyelvű státusz figyelés a client.py-ból kapott érték alapján
-            status_value = 1.0 if d.get('is_active', False) else 0.0
 
+            status_value = 1.0 if d.get('is_active', False) else 0.0
             status_metric.add_metric(
                 [d['domain'], str(d['id']), d['label'], d['status_text'], d['nameservers']],
                 status_value
             )
+
+            # 2. DNS rekordok száma az adott domainhez
+            dns_records = d.get('dns_records', [])
+            dns_records_total_metric.add_metric([d['domain'], str(d['id'])], len(dns_records))
             
-            # DNS rekordok hozzáfűzése a metrikákhoz
-            for r in d.get('dns_records', []):
+            # DNS rekordok részletezése
+            for r in dns_records:
                 dns_record_metric.add_metric(
                     [d['domain'], r['hostname'], r['type'], r['value'], r['ttl']],
                     1.0 
@@ -211,7 +222,9 @@ class ForpsiCollector(object):
 
         yield expiry_days_metric
         yield status_metric
-        yield dns_record_metric  # ÚJ
+        yield dns_record_metric
+        yield domains_total_metric          # ÚJ: Yieldeljük a domain countert
+        yield dns_records_total_metric      # ÚJ: Yieldeljük a DNS countert
         yield scrape_success_metric
-        yield refresh_in_progress_metric  # ÚJ
-        yield cache_age_metric  # ÚJ
+        yield refresh_in_progress_metric
+        yield cache_age_metric
