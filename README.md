@@ -2,36 +2,31 @@
 
 A Prometheus exporter that collects information from the Forpsi administration interface and exposes it as Prometheus metrics.
 
-Collected data includes:
 
-- domain status
-- domain expiration dates
-- DNS records
-- exporter health information
+> [!WARNING]
+> This project is **unofficial** and is **not affiliated with, endorsed by, or supported by Forpsi**.
+>
+> It relies on the current structure of the Forpsi administration interface. Changes made by Forpsi may temporarily break the exporter until it is updated.
+>
+> 🚧 This project is under active development. Features, metrics, and compatibility may change between releases.
 
 
 ## Features
+| Service                    | `forpsi.hu` | `forpsi.com` | `forpsi.cz` | `forpsi.sk` | `forpsi.pl` |
+|----------------------------|:-----------:|:------------:|:-----------:|:-----------:|:-----------:|
+| Invoices monitoring        | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
+| Domains monitoring         | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
+| Domains expiration dates   | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
+| DNS hosting records        | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
 
-- ✅ Domain expiration monitoring
-- ✅ Domain status monitoring
-- ✅ DNS record export
-- ✅ Grafana dashboard included
-- ✅ Docker image (linux/amd64, linux/arm64, linux/arm/v7)
-  - GitHub Container Registry (`ghcr.io/sipimokus/forpsi_exporter`)
-
-
-## Compatibility
-
-| Service                       | `forpsi.hu`  | `forpsi.com` | `forpsi.cz` | `forpsi.sk` | `forpsi.pl` |
-|-------------------------------|:------------:|:------------:|:------------:|:------------:|:------------:|
-| Domain monitoring             | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
-| Domain expiration dates       | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
-| DNS record informations       | ✅ | ⏳ | ⏳ | ⏳ | ⏳ |
-| VPS monitoring                | 💡 | 💡 | 💡 | 💡 | 💡 |
-| Webhosting monitoring         | 💡 | 💡 | 💡 | 💡 | 💡 |
-| WebBuilder monitoring         | 💡 | 💡 | 💡 | 💡 | 💡 |
-| Mail service monitoring       | 💡 | 💡 | 💡 | 💡 | 💡 |
-| SSL certificate monitoring    | 💡 | 💡 | 💡 | 💡 | 💡 |
+## Planned Features
+| Service                    | `forpsi.hu` | `forpsi.com` | `forpsi.cz` | `forpsi.sk` | `forpsi.pl` |
+|----------------------------|:-----------:|:------------:|:-----------:|:-----------:|:-----------:|
+| VPS monitoring             | 💡 | 💡 | 💡 | 💡 | 💡 |
+| Webhosting monitoring      | 💡 | 💡 | 💡 | 💡 | 💡 |
+| WebBuilder monitoring      | 💡 | 💡 | 💡 | 💡 | 💡 |
+| Mail service monitoring    | 💡 | 💡 | 💡 | 💡 | 💡 |
+| SSL certificate monitoring | 💡 | 💡 | 💡 | 💡 | 💡 |
 
 **Legend**
 - ✅ Supported and tested
@@ -40,7 +35,6 @@ Collected data includes:
 - ❌ Not supported
 
 The Forpsi platforms are expected to be similar, but differences in localization, HTML structure, or available features may require additional adjustments.
-
 
 ## Configuration
 
@@ -56,7 +50,6 @@ The exporter is configured using environment variables.
 | `CACHE_TTL` | Background refresh interval in seconds | `3600` |
 
 You can either provide them directly through your container runtime or create a `.env` file and reference it using `--env-file` or Docker Compose.
-
 
 ## Docker
 
@@ -76,7 +69,6 @@ docker run -d \
   ghcr.io/sipimokus/forpsi_exporter:latest
 ```
 
-
 ## Docker Compose
 
 ```yaml
@@ -91,19 +83,26 @@ services:
       - "9123:9123"
 ```
 
-
 ## Metrics
+
 See [README_metrics.md](README_metrics.md) for dashboard usage, available panels, and metric reference.
 
-### Prometheus
+### Prometheus
+
 Metrics are available at:
+
 ```
 http://localhost:9123/metrics
 ```
 
-### Grafana Dashboard
-A ready-to-import Grafana dashboard is included: [grafana/forpsi-exporter-dashboard.json](grafana/forpsi-exporter-dashboard.json)
 
+## Grafana Dashboard
+
+A ready-to-import Grafana dashboard is included:
+
+```
+grafana/forpsi-exporter-dashboard.json
+```
 
 ## Prometheus configuration example
 
@@ -114,6 +113,18 @@ scrape_configs:
       - targets:
           - localhost:9123
 ```
+
+
+## Security
+
+The exporter requires your Forpsi account credentials to access the administration interface.
+
+Credentials are used only for authentication and are never exposed as Prometheus metrics or logs.
+
+
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 
 ## Acknowledgements
