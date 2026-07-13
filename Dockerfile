@@ -1,17 +1,22 @@
+### 1. Build
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+
+### 2. Runtime
 FROM python:3.11-slim
 
-# Beállítjuk a munkakönyvtárat
 WORKDIR /app
-
-# Másoljuk a követelményeket és telepítjük őket
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Másoljuk a teljes kódot (a mappaszerkezeted szerint)
+COPY --from=builder /root/.local /root/.local
 COPY . .
 
-# FONTOS: Megadjuk a Pythonnak, hogy a /app mappát tekintse gyökérnek az importokhoz
+ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
 
-# FONTOS: Ne a fájlt indítsd direktben, hanem modulként a -m kapcsolóval
 CMD ["python", "-m", "app.main"]
