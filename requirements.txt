@@ -1,0 +1,8 @@
+# Hálózati kérések kezelése
+requests>=2.31.0
+
+# Prometheus integráció
+prometheus_client>=0.20.0
+
+# Konfiguráció kezelése (ENV változókhoz)
+pydantic-settings>=2.4.0
