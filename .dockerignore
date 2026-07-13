@@ -1,0 +1,12 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.log
+tests
+docs
+.env
+venv
+.venv
+tmp/
