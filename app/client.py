@@ -204,10 +204,24 @@ class ForpsiClient:
                     amount = float(raw_amount)
                 except ValueError:
                     amount = 0.0
+                    
+                # --- Logika a description felbontására ---
+                raw_description = row[1].strip()
+                service_name = ""
+                service_code = raw_description
+
+                # Regex keresés: "Bármi (KÓD)" formátum
+                match = re.search(r'^(.*?)\s*\(([^)]+)\)$', raw_description)
+                if match:
+                    service_name = match.group(1).strip()
+                    service_code = match.group(2).strip()
+                # --------------------------------------------
 
                 invoices.append({
                     'service_type': row[0].strip(),
-                    'description': row[1].strip(),
+                    'description': raw_description, # Érdemes meghagyni az eredetit is, ha kellene
+                    'service_name': service_name,
+                    'service_code': service_code,
                     'proforma_id': row[2].strip(),
                     'tax_id': row[3].strip(),
                     'is_paid': is_paid,

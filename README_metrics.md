@@ -172,10 +172,11 @@ Values:
 
 Labels:
 
-- `description`
 - `issue_date`
 - `payment_date`
 - `proforma_id`
+- `service_code`
+- `service_name`
 - `service_type`
 - `tax_id`
 
@@ -183,12 +184,13 @@ Example:
 
 ```text
 forpsi_invoice_paid_status{
-  description="example.hu (DOMAIN)",
   issue_date="2027-01-01",
   payment_date="2027-01-02",
   proforma_id="0000000000",
+  service_code="D00123456",
+  service_name="example.hu",
   service_type="Domain",
-  tax_id="PAID"
+  tax_id="202701000001"
 } 1
 ```
 
@@ -201,8 +203,9 @@ Invoice amount.
 Labels:
 
 - `currency`
-- `description`
 - `proforma_id`
+- `service_code`
+- `service_name`
 - `service_type`
 - `status`
 
@@ -211,8 +214,9 @@ Example:
 ```text
 forpsi_invoice_amount{
   currency="HUF",
-  description="example.hu (DOMAIN)",
   proforma_id="0000000000",
+  service_code="D00123456",
+  service_name="example.hu",
   service_type="Domain",
   status="PAID"
 } 2500

@@ -212,12 +212,12 @@ class ForpsiCollector(object):
         invoice_status_metric = GaugeMetricFamily(
             'forpsi_invoice_paid_status',
             '1 if the invoice is PAID, 0 if UNPAID',
-            labels=['service_type', 'description', 'proforma_id', 'tax_id', 'issue_date', 'payment_date']
+            labels=['service_type', 'service_name', 'service_code', 'proforma_id', 'tax_id', 'issue_date', 'payment_date']
         )
         invoice_amount_metric = GaugeMetricFamily(
             'forpsi_invoice_amount',
             'Amount of the invoice',
-            labels=['service_type', 'description', 'proforma_id', 'currency', 'status']
+            labels=['service_type', 'service_name', 'service_code', 'proforma_id', 'currency', 'status']
         )
         invoice_count_metric = GaugeMetricFamily(
             'forpsi_invoices_total',
@@ -276,7 +276,8 @@ class ForpsiCollector(object):
             invoice_status_metric.add_metric(
                 [
                     inv['service_type'], 
-                    inv['description'], 
+                    inv['service_name'],  # ÚJ MEZŐ
+                    inv['service_code'],  # ÚJ MEZŐ
                     inv['proforma_id'], 
                     inv['tax_id'], 
                     inv['issue_date'], 
@@ -288,7 +289,8 @@ class ForpsiCollector(object):
             invoice_amount_metric.add_metric(
                 [
                     inv['service_type'], 
-                    inv['description'], 
+                    inv['service_name'],  # ÚJ MEZŐ
+                    inv['service_code'],  # ÚJ MEZŐ
                     inv['proforma_id'], 
                     inv['currency'], 
                     inv['status_text']
