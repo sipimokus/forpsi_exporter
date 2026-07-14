@@ -20,13 +20,31 @@ class ForpsiCollector(object):
     vissza -> a /metrics lekérdezés nem tud timeoutolni a Forpsi felé
     irányuló lassú kérések miatt.
     """
-    def __init__(self, client: ForpsiClient, cache_ttl_seconds: int = 300):
+    def __init__(
+        self,
+        client: ForpsiClient,
+        cache_ttl_seconds: int = 300,
+        dns_error_threshold: int = 5,
+        dns_error_cooldown_seconds: int = 3600,
+    ):
         self.client = client
         self.cache_ttl = cache_ttl_seconds
+
+        # Circuit breaker beállítások a DNS lekérdezésekhez: ha egy domain
+        # ennyi egymást követő alkalommal hibázik, egy ideig (cooldown)
+        # nem próbálkozunk vele újra minden ciklusban - ezzel elkerülve a
+        # felesleges, folyamatosan hibázó kéréseket/login-kísérleteket egy
+        # tartósan rossz konfigurációjú (pl. elgépelt ID-jú) domainnél.
+        self.dns_error_threshold = dns_error_threshold
+        self.dns_error_cooldown_seconds = dns_error_cooldown_seconds
 
         self.lock = threading.Lock()
         self.cached_domains: List[Dict] = []
         self.cached_invoices: List[Dict] = []
+        self.cached_dns_errors: Dict[int, bool] = {}  # domain_id -> volt-e hiba a legutóbbi DNS fetch-nél
+        self.dns_consecutive_failures: Dict[int, int] = {}  # domain_id -> hány egymást követő hiba
+        self.dns_circuit_open_until: Dict[int, float] = {}  # domain_id -> meddig szüneteltetjük a próbálkozást
+        self.last_refresh_error_count = 0  # hány hiba történt a legutóbbi háttérfrissítés során összesen
         self.last_scrape_time = 0.0
         self.last_scrape_success = 0  # amíg nincs első sikeres frissítés, 0
         self.refresh_in_progress = False
@@ -62,6 +80,7 @@ class ForpsiCollector(object):
 
     def _refresh_once(self) -> None:
         logger.info("Háttérfrissítés indítása a Forpsiról (metrics lekérdezés váltotta ki)...")
+        error_count = 0
         try:
             # --- Domain infók lekérése ---
             domainek = self.client.get_domains_info()
@@ -81,6 +100,7 @@ class ForpsiCollector(object):
             except Exception as inv_err:
                 logger.error(f"Számlák letöltési hibája (marad a cache): {inv_err}")
                 szamlak = self.cached_invoices  # Hiba esetén megtartjuk a régit
+                error_count += 1
 
             # Az előző cache-ből kinyerjük az egyes domainekhez tartozó, korábban
             # már lekért DNS rekordokat, hogy frissítés közben NE tűnjenek el
@@ -109,14 +129,55 @@ class ForpsiCollector(object):
                 nameservers = d.get('nameservers', '')
                 if not nameservers or 'forpsi' not in nameservers.lower():
                     continue
+
+                if not d.get('id'):
+                    # Nincs érvényes (nem 0) domain ID - ne küldjünk DNS exportot
+                    # ismeretlen ID-val, mert az rossz/idegen adatot eredményezhetne.
+                    logger.error(
+                        f"{d['domain']}: nincs érvényes domain ID (id=0) - DNS lekérdezés kihagyva, "
+                        f"a régi DNS adatok megmaradnak."
+                    )
+                    error_count += 1
+                    continue
+
+                now = time.time()
+                with self.lock:
+                    cooldown_until = self.dns_circuit_open_until.get(d['id'], 0.0)
+
+                if now < cooldown_until:
+                    # Circuit breaker nyitva: ez a domain túl sokszor hibázott
+                    # egymás után, egyelőre nem próbálkozunk vele újra, hogy ne
+                    # generáljunk felesleges (folyamatosan hibázó) kéréseket/
+                    # login-kísérleteket. A régi DNS adatok maradnak érvényben.
+                    remaining = int(cooldown_until - now)
+                    logger.warning(
+                        f"{d['domain']}: DNS lekérdezés kihagyva (circuit breaker aktív, "
+                        f"még kb. {remaining}s a cooldown vége) - valószínűleg tartós konfigurációs hiba."
+                    )
+                    continue
+
                 try:
                     dns_records = self.client.get_dns_records(d['id'])
                     logger.info(f"Sikeresen beolvasva {len(dns_records)} db DNS rekord a(z) {d['domain']} domainhez.")
                 except Exception as dns_err:
                     logger.error(f"Hiba a(z) {d['domain']} DNS rekordjainak lekérése közben: {dns_err} - a korábbi DNS adatok megmaradnak ennél a domainnél.")
+                    error_count += 1
+                    with self.lock:
+                        self.cached_dns_errors[d['id']] = True
+                        failures = self.dns_consecutive_failures.get(d['id'], 0) + 1
+                        self.dns_consecutive_failures[d['id']] = failures
+                        if failures >= self.dns_error_threshold:
+                            self.dns_circuit_open_until[d['id']] = time.time() + self.dns_error_cooldown_seconds
+                            logger.error(
+                                f"{d['domain']}: {failures} egymást követő hiba - a DNS lekérdezését "
+                                f"{self.dns_error_cooldown_seconds}s-ra szüneteltetjük (circuit breaker nyitva)."
+                            )
                     continue
 
                 with self.lock:
+                    self.cached_dns_errors[d['id']] = False
+                    self.dns_consecutive_failures[d['id']] = 0
+                    self.dns_circuit_open_until.pop(d['id'], None)
                     # Megkeressük a domaint az AKTUÁLIS cache-ben (elképzelhető, hogy
                     # időközben már egy új teljes lista is publikálódott, ilyenkor
                     # csak akkor írjuk be, ha a domain még mindig szerepel benne)
@@ -127,7 +188,10 @@ class ForpsiCollector(object):
 
             with self.lock:
                 self.last_scrape_time = time.time()
-            logger.info("Minden DNS adat sikeresen frissítve és elmentve a cache-be (háttérszál).")
+                self.last_refresh_error_count = error_count
+            logger.info(f"Minden DNS adat sikeresen frissítve és elmentve a cache-be (háttérszál).")
+            if error_count:
+                logger.warning(f"A háttérfrissítés {error_count} hibával futott le - lásd a fenti log sorokat.")
 
         except Exception as e:
             error_msg = str(e)
@@ -141,6 +205,7 @@ class ForpsiCollector(object):
             self.client._authenticated = False
             with self.lock:
                 self.last_scrape_success = 0
+                self.last_refresh_error_count = max(error_count, 1)
             # A régi cache-elt adatokat megtartjuk, nem töröljük
 
     def collect(self):
@@ -152,6 +217,10 @@ class ForpsiCollector(object):
         with self.lock:
             domainek = list(self.cached_domains)
             szamlak = list(self.cached_invoices)
+            dns_errors = dict(self.cached_dns_errors)
+            dns_consecutive_failures = dict(self.dns_consecutive_failures)
+            dns_circuit_open_until = dict(self.dns_circuit_open_until)
+            last_refresh_error_count = self.last_refresh_error_count
             last_scrape_success = self.last_scrape_success
             last_scrape_time = self.last_scrape_time
             refreshing = self.refresh_in_progress
@@ -243,6 +312,25 @@ class ForpsiCollector(object):
             'forpsi_exporter_cache_age_seconds',
             'Age in seconds of the currently served cached data'
         )
+        dns_fetch_error_metric = GaugeMetricFamily(
+            'forpsi_domain_dns_fetch_error',
+            '1 if the last DNS fetch attempt for this domain failed (old cached DNS data is being served), 0 otherwise',
+            labels=['domain', 'domain_id']
+        )
+        dns_consecutive_failures_metric = GaugeMetricFamily(
+            'forpsi_domain_dns_consecutive_failures',
+            'Number of consecutive DNS fetch failures for this domain (resets to 0 on success)',
+            labels=['domain', 'domain_id']
+        )
+        dns_circuit_open_metric = GaugeMetricFamily(
+            'forpsi_domain_dns_circuit_open',
+            '1 if DNS fetching for this domain is currently paused by the circuit breaker (too many consecutive failures), 0 otherwise',
+            labels=['domain', 'domain_id']
+        )
+        last_refresh_errors_metric = GaugeMetricFamily(
+            'forpsi_last_refresh_errors_total',
+            'Number of errors encountered during the last background refresh attempt (0 = clean run)'
+        )
 
         # 1. Teljes domain szám beállítása
         domains_total_metric.add_metric([], len(domainek))
@@ -263,6 +351,21 @@ class ForpsiCollector(object):
             # 2. DNS rekordok száma az adott domainhez
             dns_records = d.get('dns_records', [])
             dns_records_total_metric.add_metric([d['domain'], str(d['id'])], len(dns_records))
+
+            # Volt-e hiba a legutóbbi DNS fetch-nél ennél a domainnél
+            dns_fetch_error_metric.add_metric(
+                [d['domain'], str(d['id'])],
+                1.0 if dns_errors.get(d['id']) else 0.0
+            )
+            dns_consecutive_failures_metric.add_metric(
+                [d['domain'], str(d['id'])],
+                dns_consecutive_failures.get(d['id'], 0)
+            )
+            circuit_open = dns_circuit_open_until.get(d['id'], 0.0) > time.time()
+            dns_circuit_open_metric.add_metric(
+                [d['domain'], str(d['id'])],
+                1.0 if circuit_open else 0.0
+            )
             
             # DNS rekordok részletezése
             for r in dns_records:
@@ -311,11 +414,15 @@ class ForpsiCollector(object):
         scrape_success_metric.add_metric([], last_scrape_success)
         refresh_in_progress_metric.add_metric([], 1.0 if refreshing else 0.0)
         cache_age_metric.add_metric([], age if age >= 0 else -1.0)
+        last_refresh_errors_metric.add_metric([], last_refresh_error_count)
 
         yield expiry_days_metric
         yield status_metric
         yield dns_record_metric
         yield dns_records_total_metric
+        yield dns_fetch_error_metric
+        yield dns_consecutive_failures_metric
+        yield dns_circuit_open_metric
         yield domains_total_metric
         yield invoice_status_metric
         yield invoice_count_metric
@@ -324,3 +431,4 @@ class ForpsiCollector(object):
         yield scrape_success_metric
         yield refresh_in_progress_metric
         yield cache_age_metric
+        yield last_refresh_errors_metric

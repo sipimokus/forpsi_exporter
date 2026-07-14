@@ -50,20 +50,137 @@ class ForpsiClient:
         except requests.RequestException as e:
             raise ConnectionError(f"Hálózati hiba az azonosítás során: {e}")
 
+    @staticmethod
+    def _looks_like_login_page(text: str) -> bool:
+        """
+        Azt nézi, hogy a válasz konkrétan egy LOGIN oldalnak tűnik-e
+        (session lejárt -> visszairányítás az index.php login formra).
+        Ezt olyan végpontoknál használjuk, amik normál esetben is HTML-t
+        adnak vissza (pl. domains-list.php), ezért ott az általános
+        "<html>" jelenlét nem árulkodó - a login form mezői viszont igen.
+        """
+        if not text or not text.strip():
+            return True
+        snippet = text.strip()[:2000].lower()
+        login_markers = ('name="user_name"', 'name="password"', "client_login")
+        return any(marker in snippet for marker in login_markers)
+
+    @staticmethod
+    def _looks_like_html(text: str) -> bool:
+        """
+        Azt nézi, hogy a válasz HTML-nek tűnik-e olyan végpontoknál, ahol
+        KIZÁRÓLAG sima CSV/szöveg választ várunk (export végpontok). Ott
+        bármilyen HTML jelenléte (login oldal, hibaoldal, stb.) azt jelenti,
+        hogy valami elromlott - tipikusan lejárt szerver oldali session.
+        """
+        if not text or not text.strip():
+            return True
+        snippet = text.strip()[:1000].lower()
+        html_markers = ('<!doctype', '<html', '<head', '<body', '<script')
+        return any(marker in snippet for marker in html_markers)
+
+    def _fetch_with_reauth(self, method: str, url: str, expect: str = 'csv', **kwargs) -> "requests.Response":
+        """
+        Elvégzi a kérést, és megkülönbözteti a kétféle hibalehetőséget:
+
+        1. HTTP-szintű hiba (pl. 404, 500, ...) - ezt egy elgépelt URL, rossz
+           domain_id, vagy szerver oldali probléma okozza. Ezen egy
+           újra-bejelentkezés NEM segít, ezért ilyenkor nem is próbálkozunk
+           vele - egyből hibát dobunk, hogy ne generáljunk felesleges login
+           kéréseket a Forpsi felé (ami sok domain esetén könnyen rate
+           limit/tiltás kockázatával járna).
+
+        2. A válasz 200-as, de a TARTALMA login oldalnak / HTML-nek tűnik a
+           várt CSV/adat helyett - ez a tényleges "lejárt szerver oldali
+           session" tünete (a self._authenticated flag ugyanis csak a
+           kezdeti bejelentkezéskor állítódik be, ezt közben nem érzékelnénk
+           magától). Csak EBBEN az esetben próbálunk egyszer friss
+           bejelentkezést, és ismételjük meg a kérést.
+
+        expect='csv'   -> tiszta CSV/szöveg várt (export végpontok); bármilyen
+                           HTML jelenléte hibának számít.
+        expect='html'  -> maga a végpont is HTML-t ad normál esetben (pl.
+                           domains-list.php); csak a konkrét login form
+                           jelenléte számít hibának.
+        """
+        is_invalid_content = self._looks_like_html if expect == 'csv' else self._looks_like_login_page
+        do_request = self.session.get if method == 'get' else self.session.post
+
+        response = do_request(url, **kwargs)
+
+        if response.status_code != 200:
+            # HTTP hiba - elgépelt URL, rossz ID, szerver hiba, stb.
+            # Újra-hitelesítés ezen nem segítene, ezért nem is próbáljuk.
+            raise RuntimeError(
+                f"HTTP hiba ({response.status_code}) a következő URL-en: {url}"
+            )
+
+        if is_invalid_content(response.text):
+            logger.warning(
+                f"Gyanús válasz érkezett ({url}) - a session valószínűleg lejárt, "
+                f"újra-hitelesítés megkísérlése..."
+            )
+            self._authenticated = False
+            self.session.cookies.clear()
+            self._authenticate()
+            response = do_request(url, **kwargs)
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"HTTP hiba ({response.status_code}) újra-hitelesítés után a következő URL-en: {url}"
+                )
+
+            if is_invalid_content(response.text):
+                raise ConnectionError(
+                    f"A Forpsi nem adott vissza érvényes választ újra-hitelesítés után sem ({url}) "
+                    f"- session/hitelesítési probléma."
+                )
+
+        return response
+
     def _get_domain_ids(self) -> Dict[str, int]:
         """
         A domain lista CSV exportja nem tartalmaz domain ID-t (csak a DNS
         exporthoz szükséges id=... paraméterhez kellene), ezért ezt egy
         könnyű regex-szel kiolvassuk a sima domains-list.php oldalról,
         és domain név -> id szótárrá alakítjuk.
-        """
-        response = self.session.get(f"{self.base_url}/domain/domains-list.php")
-        if response.status_code != 200:
-            raise RuntimeError(f"Nem sikerült letölteni a domain listát az ID-khez: {response.status_code}")
 
+        Ha a regex egyetlen egyezést sem talál (pl. mert időközben lejárt a
+        session, vagy megváltozott az oldal HTML formátuma), azt NEM
+        hallgatjuk el egy csendes üres dict visszaadásával - az ugyanis azt
+        eredményezné, hogy MINDEN domain id=0-t kapna a get_domains_info()-ban,
+        ami minden DNS exportot ugyanarra a (hibás) URL-re küldene. Helyette
+        egyszer megpróbálunk friss bejelentkezéssel újra próbálkozni, és ha
+        az is üres eredményt ad, hibát dobunk.
+        """
         pattern = r'id=(\d+)&amp;[^>]*>([^<]+)</a>'
-        matches = re.findall(pattern, response.text)
-        return {name.strip(): int(d_id) for d_id, name in matches}
+
+        def fetch_and_parse() -> Dict[str, int]:
+            resp = self._fetch_with_reauth('get', f"{self.base_url}/domain/domains-list.php", expect='html')
+            matches = re.findall(pattern, resp.text)
+            return {name.strip(): int(d_id) for d_id, name in matches}
+
+        domain_ids = fetch_and_parse()
+
+        if not domain_ids:
+            logger.warning(
+                "A domains-list.php oldalon egyetlen domain ID sem található - "
+                "session probléma vagy megváltozott oldalformátum gyanús, "
+                "újra-hitelesítés megkísérlése..."
+            )
+            self._authenticated = False
+            self.session.cookies.clear()
+            self._authenticate()
+            domain_ids = fetch_and_parse()
+
+            if not domain_ids:
+                raise RuntimeError(
+                    "Nem sikerült domain ID-kat kinyerni a domains-list.php oldalról "
+                    "újra-hitelesítés után sem - lehet, hogy megváltozott az oldal HTML "
+                    "formátuma (a regex már nem illik rá)."
+                )
+
+        return domain_ids
 
     def get_domains_info(self) -> List[Dict[str, any]]:
         self._authenticate()
@@ -72,9 +189,7 @@ class ForpsiClient:
             domain_ids = self._get_domain_ids()
 
             url = f"{self.base_url}/domain/domains-list-csv-export.php"
-            response = self.session.get(url)
-            if response.status_code != 200:
-                raise RuntimeError(f"Nem sikerült letölteni a domain lista CSV exportot: {response.status_code}")
+            response = self._fetch_with_reauth('get', url, expect='csv')
 
             reader = csv.reader(io.StringIO(response.text))
             rows = list(reader)
@@ -114,6 +229,20 @@ class ForpsiClient:
                     "is_active": is_active
                 })
 
+            # Konzisztencia-ellenőrzés: ha VAN kinyert ID-lista (domain_ids nem
+            # üres, tehát a domains-list.php oldal maga rendben volt), de a CSV
+            # exportból egyetlen domain neve sem illeszkedik rá (mind id=0
+            # lenne), az arra utal, hogy a két forrás domain-nevei valamiért
+            # nem egyeznek (pl. whitespace, kis/nagybetű, encoding). Ezt NEM
+            # publikáljuk csendben - inkább hibaként kezeljük, és megtartjuk a
+            # régi (érvényes ID-jú) cache-elt adatokat.
+            if domain_ids and parsed_domains and all(d['id'] == 0 for d in parsed_domains):
+                raise RuntimeError(
+                    "A domains-list.php-ből kinyert domain ID-k egyike sem illeszkedik "
+                    "a CSV export domain neveire (minden domain id=0 lenne) - a domain "
+                    "lista frissítése megszakítva, a régi cache-elt adatok megmaradnak."
+                )
+
             return parsed_domains
 
         except requests.RequestException as e:
@@ -136,15 +265,10 @@ class ForpsiClient:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/139.0'
         }
 
-        try:
-            response = self.session.post(url, data={'ak': 'export', 'export_type': 'csv'}, headers=headers)
-        except requests.RequestException as e:
-            logger.error(f"Hálózati hiba a(z) {domain_id} DNS exportjának letöltésekor: {e}")
-            return []
-
-        if response.status_code != 200:
-            logger.error(f"Nem sikerült letölteni a DNS exportot az alábbi ID-hoz: {domain_id} ({response.status_code})")
-            return []
+        response = self._fetch_with_reauth(
+            'post', url, expect='csv',
+            data={'ak': 'export', 'export_type': 'csv'}, headers=headers
+        )
 
         reader = csv.reader(io.StringIO(response.text), delimiter=';')
         rows = list(reader)
@@ -172,7 +296,7 @@ class ForpsiClient:
         url = f"{self.base_url}/billing/invoices-csv-export.php"
 
         try:
-            response = self.session.get(url)
+            response = self._fetch_with_reauth('get', url, expect='csv')
             reader = csv.reader(io.StringIO(response.text))
             rows = list(reader)
 
